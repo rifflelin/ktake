@@ -16,12 +16,14 @@ struct MicTestLevel {
 
 /// One instance belongs to one audio graph, either live or offline.
 final class VocalEffects {
-    let eq = AVAudioUnitEQ(numberOfBands: 2)
+    let eq = AVAudioUnitEQ(numberOfBands: 4)
     let dynamics = AVAudioUnitEffect(audioComponentDescription: AudioComponentDescription(
         componentType: kAudioUnitType_Effect, componentSubType: kAudioUnitSubType_DynamicsProcessor,
         componentManufacturer: kAudioUnitManufacturer_Apple, componentFlags: 0, componentFlagsMask: 0))
     let reverb = AVAudioUnitReverb()
     var nodes: [AVAudioNode] { [eq, dynamics, reverb] }
+    private let echo = AVAudioUnitDelay()
+    private var currentSettings: VocalSettings?
 
     init() {
         eq.bands[0].filterType = .highPass
@@ -32,37 +34,83 @@ final class VocalEffects {
         eq.bands[1].frequency = 3200
         eq.bands[1].bandwidth = 1.5
         eq.bands[1].bypass = false
-        reverb.loadFactoryPreset(.plate)
-        update(brightness: 2, compression: 0.35, space: 18)
+        eq.bands[2].filterType = .parametric
+        eq.bands[2].frequency = 260
+        eq.bands[2].bandwidth = 1.2
+        eq.bands[3].filterType = .highShelf
+        eq.bands[3].frequency = 8000
+        echo.lowPassCutoff = 4700
+        update(VocalSettings())
     }
 
     func update(brightness: Float, compression: Float, space: Float) {
-        eq.bands[1].gain = brightness
-        reverb.wetDryMix = space
+        update(VocalSettings(brightness: brightness, compression: compression, reverb: space))
+    }
+
+    func update(_ settings: VocalSettings) {
+        let settings = settings.bounded
+        guard settings != currentSettings else { return }
+        let tuning = settings.tuning
+        if currentSettings?.tuning.room != tuning.room {
+            reverb.loadFactoryPreset(tuning.room.preset)
+        }
+        eq.bands[0].frequency = tuning.lowCut
+        eq.bands[1].gain = settings.brightness
+        eq.bands[2].gain = tuning.warmth
+        eq.bands[2].bypass = tuning.warmth == 0
+        eq.bands[3].gain = tuning.air
+        eq.bands[3].bypass = tuning.air == 0
+        if tuning.echoTimeMS != currentSettings?.tuning.echoTimeMS { echo.delayTime = Double(tuning.echoTimeMS) / 1000 }
+        echo.feedback = tuning.echoFeedback
+        echo.wetDryMix = tuning.echo
+        echo.bypass = tuning.echo == 0
+        reverb.wetDryMix = settings.reverb
         let unit = dynamics.audioUnit
-        dynamics.bypass = compression <= 0.01
-        AudioUnitSetParameter(unit, kDynamicsProcessorParam_Threshold, kAudioUnitScope_Global, 0, -12 - compression * 16, 0)
+        let compression = settings.compression
+        let compressing = compression > 0.01
+        AudioUnitSetParameter(unit, kDynamicsProcessorParam_Threshold, kAudioUnitScope_Global, 0, compressing ? -12 - compression * 16 : 0, 0)
         AudioUnitSetParameter(unit, kDynamicsProcessorParam_HeadRoom, kAudioUnitScope_Global, 0, 12 - compression * 10, 0)
-        AudioUnitSetParameter(unit, kDynamicsProcessorParam_ExpansionRatio, kAudioUnitScope_Global, 0, 1, 0)
-        AudioUnitSetParameter(unit, kDynamicsProcessorParam_ExpansionThreshold, kAudioUnitScope_Global, 0, -60, 0)
-        AudioUnitSetParameter(unit, kDynamicsProcessorParam_AttackTime, kAudioUnitScope_Global, 0, 0.005, 0)
-        AudioUnitSetParameter(unit, kDynamicsProcessorParam_ReleaseTime, kAudioUnitScope_Global, 0, 0.12, 0)
+        AudioUnitSetParameter(unit, kDynamicsProcessorParam_ExpansionRatio, kAudioUnitScope_Global, 0, tuning.gateEnabled ? 3 : 1, 0)
+        AudioUnitSetParameter(unit, kDynamicsProcessorParam_ExpansionThreshold, kAudioUnitScope_Global, 0, tuning.gateThreshold, 0)
+        AudioUnitSetParameter(unit, kDynamicsProcessorParam_AttackTime, kAudioUnitScope_Global, 0, tuning.attackMS / 1000, 0)
+        AudioUnitSetParameter(unit, kDynamicsProcessorParam_ReleaseTime, kAudioUnitScope_Global, 0, tuning.releaseMS / 1000, 0)
         AudioUnitSetParameter(unit, kDynamicsProcessorParam_OverallGain, kAudioUnitScope_Global, 0, 0, 0)
+        dynamics.bypass = !compressing && !tuning.gateEnabled
+        currentSettings = settings
+    }
+
+    func applyReverbAfterStart() {
+        guard let currentSettings else { return }
+        // AVAudioEngine can initialize the reverb again when its render format is set.
+        reverb.loadFactoryPreset(currentSettings.tuning.room.preset)
+        reverb.wetDryMix = currentSettings.reverb
     }
 
     func connect(in engine: AVAudioEngine, from source: AVAudioNode, to destination: AVAudioNode,
                  format: AVAudioFormat, includeReverb: Bool = true) {
         engine.attach(eq)
         engine.attach(dynamics)
+        engine.attach(echo)
         engine.connect(source, to: eq, format: format)
         engine.connect(eq, to: dynamics, format: format)
+        engine.connect(dynamics, to: echo, format: format)
         if includeReverb {
             engine.attach(reverb)
-            engine.connect(dynamics, to: reverb, format: format)
+            engine.connect(echo, to: reverb, format: format)
             let stereo = AVAudioFormat(standardFormatWithSampleRate: format.sampleRate, channels: 2)!
             engine.connect(reverb, to: destination, format: stereo)
         } else {
-            engine.connect(dynamics, to: destination, format: format)
+            engine.connect(echo, to: destination, format: format)
+        }
+    }
+}
+
+extension VocalRoom {
+    var preset: AVAudioUnitReverbPreset {
+        switch self {
+        case .room: .mediumRoom
+        case .plate: .plate
+        case .hall: .largeHall
         }
     }
 }
@@ -175,6 +223,7 @@ final class AudioEngine {
             capture.removeTap(onBus: 0)
             throw error
         }
+        effects.applyReverbAfterStart()
         self.engine = engine
         self.captureFormat = mono
         self.monitorMixer = monitor
@@ -194,9 +243,9 @@ final class AudioEngine {
         guard status == noErr else { throw AppFailure(message: "无法打开音频设备（\(status)）。请确认设备已连接且未被独占。") }
     }
 
-    func update(monitoring: Bool, gain: Float, brightness: Float, compression: Float, space: Float) {
-        monitorMixer?.outputVolume = monitoring ? gain : 0
-        effects?.update(brightness: brightness, compression: compression, space: space)
+    func update(monitoring: Bool, settings: VocalSettings) {
+        effects?.update(settings)
+        monitorMixer?.outputVolume = monitoring ? settings.gain : 0
     }
 
     func stop() {

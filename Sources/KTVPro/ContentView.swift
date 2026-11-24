@@ -474,12 +474,13 @@ struct ContentView: View {
                     Text("请使用有线耳机，并关闭声卡的直通监听。")
                         .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     Picker("音色", selection: Binding(get: { model.preset }, set: { model.selectPreset($0) })) {
-                        ForEach(["自然人声", "温暖抒情", "清晰干声"], id: \.self) { Text($0) }
+                        ForEach(SessionModel.vocalPresets, id: \.self) { Text($0) }
                     }.font(.system(size: 11))
                     effectSlider("人声音量", value: $model.monitorGain, range: 0...1.5, label: "\(Int(model.monitorGain * 100))%")
                     effectSlider("明亮度", value: $model.brightness, range: -4...6, label: String(format: "%+.0f dB", model.brightness))
                     effectSlider("压缩", value: $model.compression, range: 0...1, label: "\(Int(model.compression * 100))%")
                     effectSlider("混响", value: $model.reverb, range: 0...45, label: "\(Int(model.reverb))%")
+                    VocalTuningControls(tuning: $model.vocalTuning)
                     Text("效果只用于监听，录音保存原始人声。")
                         .font(.system(size: 10)).foregroundStyle(.tertiary)
                 }

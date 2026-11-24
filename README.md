@@ -4,7 +4,7 @@ KTake 可以从歌曲里提取伴奏，跟着 MV 和同步歌词练唱。录下�
 
 ## 安装
 
-打开 DMG，把 KTake 拖到「应用程序」。录唱支持 **macOS 14 及以上**的 Apple 芯片和 Intel Mac，伴奏分离需要 Apple 芯片。[下载 KTake 0.10.15 DMG](https://github.com/rifflelin/ktake/releases/download/v0.10.15/KTake-0.10.15-macOS-universal.dmg)
+打开 DMG，把 KTake 拖到「应用程序」。录唱支持 **macOS 14 及以上**的 Apple 芯片和 Intel Mac，伴奏分离需要 Apple 芯片。[下载 KTake 0.10.16 DMG](https://github.com/rifflelin/ktake/releases/download/v0.10.16/KTake-0.10.16-macOS-universal.dmg)
 
 安装包内置 GarageBand 工程模板，无需另行下载。要打开导出的 `.band` 工程，Mac 上需要安装 GarageBand。
 
@@ -19,6 +19,8 @@ KTake 可以从歌曲里提取伴奏，跟着 MV 和同步歌词练唱。录下�
 5. **开始录音。** 在「录前准备」选直接录、倒数或先听一小段伴奏，点击「开始录音」（⌘R）。唱完点「结束录音」。原始 WAV 只保存人声，伴奏和监听效果不会录进去。
 
 旧版临时打开过的伴奏，可以用「导入伴奏」重新选一次。导入后可在左侧搜索，也可以从曲目右侧的「…」提取伴奏、在 Finder 中显示或移出曲库。
+
+在「实时效果监听」或「录音回听」展开「进阶调音」，可调低切、厚度、空气感、噪声门和压缩时间，也可选择房间、板式或大厅混响，调整回声。KTake 会记住返听参数，录音列表播放时可套用录制时的人声效果。
 
 ## 用 music-dl 找歌
 

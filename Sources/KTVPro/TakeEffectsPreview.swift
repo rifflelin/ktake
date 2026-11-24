@@ -1,7 +1,7 @@
 @preconcurrency import AVFoundation
 import Foundation
 
-/// EQ and compression are prepared off the main thread. The player mixes the
+/// Tone, dynamics and echo are prepared off the main thread. The player mixes the
 /// colored voice and its reverb separately so reverb and bypass stay responsive.
 final class TakeEffectsPreview: @unchecked Sendable {
     let asset: AVMutableComposition
@@ -38,8 +38,8 @@ final class TakeEffectsPreview: @unchecked Sendable {
                 if !completed { try? files.removeItem(at: directory) }
             }
             try base.writeVocalStem(to: dry)
-            try renderVocal(from: dry, to: processed, tone: settings)
-            try renderVocal(from: processed, to: wet, tone: nil)
+            try renderVocal(from: dry, to: processed, settings: settings, wetReverbOnly: false)
+            try renderVocal(from: processed, to: wet, settings: settings, wetReverbOnly: true)
             try files.removeItem(at: dry)
             try Task.checkCancellation()
 
@@ -68,11 +68,11 @@ final class TakeEffectsPreview: @unchecked Sendable {
         return track
     }
 
-    private static func renderVocal(from source: URL, to destination: URL, tone: VocalSettings?) throws {
+    private static func renderVocal(from source: URL, to destination: URL, settings: VocalSettings, wetReverbOnly: Bool) throws {
         let input = try AVAudioFile(forReading: source, commonFormat: .pcmFormatFloat32, interleaved: false)
         let inputFormat = input.processingFormat
         let block: AVAudioFrameCount = 4096
-        let channels: AVAudioChannelCount = tone == nil ? 2 : inputFormat.channelCount
+        let channels: AVAudioChannelCount = wetReverbOnly ? 2 : inputFormat.channelCount
         guard let format = AVAudioFormat(standardFormatWithSampleRate: inputFormat.sampleRate, channels: channels),
               let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: block) else {
             throw AppFailure(message: "无法准备人声效果缓冲区。")
@@ -80,27 +80,30 @@ final class TakeEffectsPreview: @unchecked Sendable {
         let engine = AVAudioEngine()
         let player = AVAudioPlayerNode()
         engine.attach(player)
-        if let tone {
-            let effects = VocalEffects()
-            effects.update(brightness: tone.brightness, compression: tone.compression, space: 0)
-            effects.connect(in: engine, from: player, to: engine.mainMixerNode, format: inputFormat, includeReverb: false)
-        } else {
+        let wetReverb: AVAudioUnitReverb?
+        if wetReverbOnly {
             let reverb = AVAudioUnitReverb()
-            reverb.loadFactoryPreset(.plate)
-            reverb.wetDryMix = 100
             engine.attach(reverb)
             engine.connect(player, to: reverb, format: inputFormat)
             engine.connect(reverb, to: engine.mainMixerNode, format: format)
+            wetReverb = reverb
+        } else {
+            let effects = VocalEffects()
+            effects.update(settings)
+            effects.connect(in: engine, from: player, to: engine.mainMixerNode, format: inputFormat, includeReverb: false)
+            wetReverb = nil
         }
         try engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: block)
         player.scheduleFile(input, at: nil)
         try engine.start()
+        wetReverb?.loadFactoryPreset(settings.tuning.room.preset)
+        wetReverb?.wetDryMix = 100
         player.play()
         defer { engine.stop() }
 
-        var settings = format.settings
-        settings[AVLinearPCMIsNonInterleaved] = false
-        let output = try AVAudioFile(forWriting: destination, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false)
+        var fileSettings = format.settings
+        fileSettings[AVLinearPCMIsNonInterleaved] = false
+        let output = try AVAudioFile(forWriting: destination, settings: fileSettings, commonFormat: .pcmFormatFloat32, interleaved: false)
         var written: AVAudioFramePosition = 0
         var retries = 0
         while written < input.length {

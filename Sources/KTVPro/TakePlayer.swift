@@ -33,19 +33,25 @@ final class TakePlayer: NSObject, AVAudioPlayerDelegate {
         let engine = AVAudioEngine()
         try AudioEngine.selectDevice(output.id, node: engine.outputNode)
         let source = AVAudioPlayerNode()
+        let effects: VocalEffects?
         if reverbOnly {
             try Self.connectReverb(in: engine, source: source, format: format, amount: settings.reverb)
+            effects = nil
         } else {
             try Self.checkFormat(format)
             engine.attach(source)
-            let effects = VocalEffects()
-            effects.update(brightness: settings.brightness, compression: settings.compression, space: settings.reverb)
-            effects.connect(in: engine, from: source, to: engine.mainMixerNode, format: format)
+            let chain = VocalEffects()
+            chain.update(settings)
+            chain.connect(in: engine, from: source, to: engine.mainMixerNode, format: format)
+            effects = chain
         }
         engine.mainMixerNode.outputVolume = 0.85 * settings.gain
 
         // Continue rendering briefly after the file ends so the reverb can decay.
-        let tailFrames = AVAudioFrameCount(max(1, format.sampleRate * (settings.reverb > 0 ? 0.75 : 0.02)))
+        let tuning = reverbOnly ? VocalTuning() : settings.tuning
+        let reverbTail = settings.reverb > 0 ? tuning.room.tailDuration : 0
+        let echoTail = tuning.echo > 0 ? 4 * Double(tuning.echoTimeMS) / 1000 : 0
+        let tailFrames = AVAudioFrameCount(max(1, format.sampleRate * max(0.02, reverbTail + echoTail)))
         guard file.length > 0, let tail = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: tailFrames) else {
             throw AppFailure(message: "录音文件没有可播放的音频。")
         }
@@ -60,6 +66,7 @@ final class TakePlayer: NSObject, AVAudioPlayerDelegate {
         }
         engine.prepare()
         try engine.start()
+        effects?.applyReverbAfterStart()
         playbackID = id
         reverbEngine = engine
         reverbFile = file

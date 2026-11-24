@@ -1,20 +1,87 @@
 import Foundation
 
+enum VocalRoom: String, Codable, CaseIterable, Sendable {
+    case room, plate, hall
+
+    var label: String {
+        switch self {
+        case .room: "房间"
+        case .plate: "板式"
+        case .hall: "大厅"
+        }
+    }
+
+    var tailDuration: TimeInterval {
+        switch self {
+        case .room: 0.6
+        case .plate: 0.75
+        case .hall: 2.2
+        }
+    }
+}
+
+struct VocalTuning: Codable, Equatable, Sendable {
+    static let lowCutRange: ClosedRange<Float> = 40...160
+    static let toneRange: ClosedRange<Float> = -6...6
+    static let gateRange: ClosedRange<Float> = -70 ... -30
+    static let attackRange: ClosedRange<Float> = 1...40
+    static let releaseRange: ClosedRange<Float> = 40...300
+    static let echoRange: ClosedRange<Float> = 0...30
+    static let echoTimeRange: ClosedRange<Float> = 70...420
+    static let echoFeedbackRange: ClosedRange<Float> = 0...45
+
+    var lowCut: Float = 80
+    var warmth: Float = 0
+    var air: Float = 0
+    var gateThreshold: Float = -70
+    var attackMS: Float = 5
+    var releaseMS: Float = 120
+    var room: VocalRoom = .plate
+    var echo: Float = 0
+    var echoTimeMS: Float = 150
+    var echoFeedback: Float = 22
+
+    var gateEnabled: Bool { gateThreshold > Self.gateRange.lowerBound }
+
+    var bounded: Self {
+        var value = self
+        let defaults = Self()
+        for (key, range): (WritableKeyPath<Self, Float>, ClosedRange<Float>) in [
+            (\.lowCut, Self.lowCutRange), (\.warmth, Self.toneRange), (\.air, Self.toneRange),
+            (\.gateThreshold, Self.gateRange), (\.attackMS, Self.attackRange), (\.releaseMS, Self.releaseRange),
+            (\.echo, Self.echoRange), (\.echoTimeMS, Self.echoTimeRange), (\.echoFeedback, Self.echoFeedbackRange)
+        ] {
+            value[keyPath: key] = boundedVocalValue(self[keyPath: key], to: range, fallback: defaults[keyPath: key])
+        }
+        return value
+    }
+}
+
+private func boundedVocalValue(_ value: Float, to range: ClosedRange<Float>, fallback: Float) -> Float {
+    value.isFinite ? min(range.upperBound, max(range.lowerBound, value)) : fallback
+}
+
 struct VocalSettings: Codable, Equatable, Sendable {
     var brightness: Float = 2
     var compression: Float = 0.35
     var reverb: Float = 18
     var gain: Float = 0.8
     var enabled = true
+    // Optional so takes and preferences saved before advanced effects still decode.
+    var advanced: VocalTuning? = nil
+
+    var tuning: VocalTuning {
+        get { advanced ?? VocalTuning() }
+        set { advanced = newValue == VocalTuning() ? nil : newValue }
+    }
 
     var bounded: Self {
-        func clamp(_ value: Float, to range: ClosedRange<Float>, fallback: Float) -> Float {
-            value.isFinite ? min(range.upperBound, max(range.lowerBound, value)) : fallback
-        }
-        return Self(brightness: clamp(brightness, to: -4...6, fallback: 2),
-                    compression: clamp(compression, to: 0...1, fallback: 0.35),
-                    reverb: clamp(reverb, to: 0...45, fallback: 0),
-                    gain: clamp(gain, to: 0...1.5, fallback: 0.8), enabled: enabled)
+        var value = Self(brightness: boundedVocalValue(brightness, to: -4...6, fallback: 2),
+                         compression: boundedVocalValue(compression, to: 0...1, fallback: 0.35),
+                         reverb: boundedVocalValue(reverb, to: 0...45, fallback: 0),
+                         gain: boundedVocalValue(gain, to: 0...1.5, fallback: 0.8), enabled: enabled)
+        value.tuning = tuning.bounded
+        return value
     }
 }
 

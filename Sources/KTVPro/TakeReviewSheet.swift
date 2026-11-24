@@ -26,7 +26,7 @@ private final class TakeReviewModel: ObservableObject {
     @Published var effects: VocalSettings {
         didSet {
             updateMix()
-            let toneChanged = tone != Tone(oldValue)
+            let toneChanged = tone != renderSettings(oldValue)
             if toneChanged || !effects.enabled { cancelEffectsPreparation() }
             if effects.enabled, toneChanged || !oldValue.enabled {
                 effectsNotice = ""
@@ -55,15 +55,17 @@ private final class TakeReviewModel: ObservableObject {
     private var auditionRange: PracticeRange?
     private var mix: TakeMix?
     private var effectsPreview: TakeEffectsPreview?
-    private var renderedTone: Tone?
+    private var renderedTone: VocalSettings?
     private var effectsTask: Task<Void, Never>?
     private var effectsGeneration = UUID()
-    private struct Tone: Equatable {
-        let brightness: Float
-        let compression: Float
-        init(_ settings: VocalSettings) { brightness = settings.brightness; compression = settings.compression }
+    private func renderSettings(_ settings: VocalSettings) -> VocalSettings {
+        var value = settings.bounded
+        value.enabled = true
+        value.gain = 1
+        value.reverb = 0
+        return value
     }
-    private var tone: Tone { Tone(effects) }
+    private var tone: VocalSettings { renderSettings(effects) }
     private var preparedBackingURL: URL?
     private var timeObserver: Any?
     private var finishObserver: NSObjectProtocol?
@@ -226,7 +228,7 @@ private final class TakeReviewModel: ObservableObject {
         }
     }
 
-    private func installEffects(_ preview: TakeEffectsPreview, tone: Tone) {
+    private func installEffects(_ preview: TakeEffectsPreview, tone: VocalSettings) {
         let playhead = position
         let resume = isPlaying
         player.pause()
@@ -494,6 +496,7 @@ struct TakeReviewSheet: View {
                              label: "\(Int((model.effects.compression * 100).rounded()))%")
                 effectSlider("混响", value: $model.effects.reverb, range: 0...45, step: 1,
                              label: "\(Int(model.effects.reverb.rounded()))%")
+                VocalTuningControls(tuning: $model.effects.tuning)
             }.disabled(!model.effects.enabled)
             HStack(spacing: 6) {
                 if model.isPreparingEffects { ProgressView().controlSize(.small) }

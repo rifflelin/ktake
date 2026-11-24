@@ -106,6 +106,7 @@ final class SessionModel: ObservableObject {
     @Published var brightness: Float = 2 { didSet { monitorParametersChanged() } }
     @Published var compression: Float = 0.35 { didSet { monitorParametersChanged() } }
     @Published var reverb: Float = 18 { didSet { monitorParametersChanged() } }
+    @Published var vocalTuning = VocalTuning() { didSet { monitorParametersChanged() } }
     @Published var videoVolume: Float = 0.65 { didSet { player.volume = videoVolume } }
     @Published private(set) var preset = "自然人声"
     @Published var mediaURL: URL?
@@ -246,6 +247,7 @@ final class SessionModel: ObservableObject {
             brightness = effects.brightness
             compression = effects.compression
             reverb = effects.reverb
+            vocalTuning = effects.tuning
         }
         if let practiceSettingsURL, let data = try? Data(contentsOf: practiceSettingsURL) {
             practice = (try? JSONDecoder().decode(SongPracticeFile.self, from: data)) ?? SongPracticeFile()
@@ -775,18 +777,36 @@ final class SessionModel: ObservableObject {
         status = "麦克风已关闭。"
     }
 
+    static let vocalPresets = ["自然人声", "温暖抒情", "清晰干声", "舞台回声"]
+
     func selectPreset(_ value: String) {
         preset = value
         switch value {
-        case "温暖抒情": brightness = 0; compression = 0.45; reverb = 26
-        case "清晰干声": brightness = 3; compression = 0.25; reverb = 0
-        default: brightness = 2; compression = 0.35; reverb = 18
+        case "温暖抒情":
+            brightness = 0
+            compression = 0.45
+            reverb = 26
+            vocalTuning = VocalTuning(warmth: 1.5, room: .hall)
+        case "清晰干声":
+            brightness = 3
+            compression = 0.25
+            reverb = 0
+            vocalTuning = VocalTuning(lowCut: 95, warmth: -1, air: 1)
+        case "舞台回声":
+            brightness = 2
+            compression = 0.4
+            reverb = 20
+            vocalTuning = VocalTuning(lowCut: 95, warmth: -1, air: 1, room: .hall, echo: 14, echoTimeMS: 260, echoFeedback: 30)
+        default:
+            brightness = 2
+            compression = 0.35
+            reverb = 18
+            vocalTuning = VocalTuning()
         }
     }
 
     func updateEffects() {
-        audio.update(monitoring: monitoring && playingTakeID == nil, gain: monitorGain,
-                     brightness: brightness, compression: compression, space: reverb)
+        audio.update(monitoring: monitoring && playingTakeID == nil, settings: monitorEffects)
     }
 
     private func monitorParametersChanged() {
@@ -798,7 +818,8 @@ final class SessionModel: ObservableObject {
     }
 
     private var monitorEffects: VocalSettings {
-        VocalSettings(brightness: brightness, compression: compression, reverb: reverb, gain: monitorGain).bounded
+        VocalSettings(brightness: brightness, compression: compression, reverb: reverb,
+                      gain: monitorGain, advanced: vocalTuning).bounded
     }
 
     var vocalSettings: VocalSettings {
