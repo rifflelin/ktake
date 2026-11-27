@@ -16,32 +16,55 @@ struct ContentView: View {
     @State private var lyricNavigator = false
     @State private var musicDLSearch = false
     @State private var requestedPunch: (Take, PracticeRange)?
+    @State private var focusStage = false
+    @AppStorage("autoFocusStageOnRecord") private var autoFocusStageOnRecord = false
+    @AppStorage("stageVisualMode") private var visualModeRaw = StageVisualMode.flowerMascot.rawValue
+    @State private var autoFocusedDuringTake = false
+    @State private var editingPhotoMouth = false
+    @State private var photoEditorStartInCrop = false
+    @StateObject private var photoMouth = PhotoMouthStore()
     @StateObject private var fiveSing = FiveSingBrowser()
+
+    private var visualMode: StageVisualMode {
+        StageVisualMode(rawValue: visualModeRaw) ?? .flowerMascot
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             StudioTheme.separator.frame(height: 1)
             HStack(spacing: 0) {
-                LibrarySidebar(model: model, accent: accent, reviewTake: { takeReview = model.beginTakeReview($0) }, openFiveSing: {
-                    fiveSing.onAdded = { [weak model] song in model?.downloadedSongAdded(song) }
-                    fiveSing.show()
-                }, openMusicDL: {
-                    if model.isPlaying { model.togglePlayback() }
-                    model.stopTakePlayback()
-                    musicDLSearch = true
-                }).frame(width: 288)
-                StudioTheme.separator.frame(width: 1)
+                if !focusStage {
+                    LibrarySidebar(model: model, accent: accent, reviewTake: { takeReview = model.beginTakeReview($0) }, openFiveSing: {
+                        fiveSing.onAdded = { [weak model] song in model?.downloadedSongAdded(song) }
+                        fiveSing.show()
+                    }, openMusicDL: {
+                        if model.isPlaying { model.togglePlayback() }
+                        model.stopTakePlayback()
+                        musicDLSearch = true
+                    })
+                    .frame(width: 288)
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+                    StudioTheme.separator.frame(width: 1)
+                }
                 VStack(spacing: 0) {
-                    mediaSources
+                    if !focusStage {
+                        mediaSources
+                            .transition(.opacity)
+                    }
                     videoWorkspace
                     transport
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .layoutPriority(1)
-                StudioTheme.separator.frame(width: 1)
-                inspector.frame(width: 294)
+                if !focusStage {
+                    StudioTheme.separator.frame(width: 1)
+                    inspector
+                        .frame(width: 294)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
             }
+            .animation(reduceMotion ? nil : StudioTheme.stageSpring, value: focusStage)
             StudioTheme.separator.frame(height: 1)
             footer
         }
@@ -49,6 +72,22 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
         .tint(accent)
         .frame(minWidth: 1060, minHeight: 740)
+        .onKeyPress(.escape) {
+            guard focusStage else { return .ignored }
+            toggleFocusStage(false)
+            return .handled
+        }
+        .onChange(of: model.isRecording) { _, recording in
+            if recording {
+                if autoFocusStageOnRecord && !focusStage {
+                    autoFocusedDuringTake = true
+                    toggleFocusStage(true)
+                }
+            } else if autoFocusedDuringTake {
+                autoFocusedDuringTake = false
+                toggleFocusStage(false)
+            }
+        }
         .sheet(item: $lyricSearch) { context in
             LyricSearchSheet(context: context) { record in
                 try model.importSearchedLyrics(record, for: context)
@@ -72,6 +111,9 @@ struct ContentView: View {
                 MusicDLSearchSheet(importer: importer) { [weak model] song in model?.musicDLSongAdded(song) }
                     .id(model.musicDLDownloadDirectory)
             }
+        }
+        .sheet(isPresented: $editingPhotoMouth) {
+            PhotoMouthEditorSheet(model: model, store: photoMouth, startInCrop: photoEditorStartInCrop)
         }
         .alert("需要处理", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             if model.permissionDenied {
@@ -97,6 +139,12 @@ struct ContentView: View {
     }
 
     private func openLyricSearch() { lyricSearch = model.lyricSearchContext() }
+
+    private func toggleFocusStage(_ enabled: Bool) {
+        if !enabled { autoFocusedDuringTake = false }
+        if reduceMotion { focusStage = enabled }
+        else { withAnimation(StudioTheme.stageSpring) { focusStage = enabled } }
+    }
 
     private var header: some View {
         HStack(spacing: 12) {
@@ -162,27 +210,86 @@ struct ContentView: View {
         }.font(.system(size: 10)).frame(maxWidth: .infinity)
     }
 
+    private func pickStagePhoto() {
+        if photoMouth.choosePhoto() {
+            visualModeRaw = StageVisualMode.photoMouth.rawValue
+            photoEditorStartInCrop = true
+            editingPhotoMouth = true
+        }
+    }
+
+    private func handleDroppedFile(_ url: URL) {
+        let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType
+        if type?.conforms(to: .image) == true {
+            if photoMouth.importPhoto(from: url) {
+                visualModeRaw = StageVisualMode.photoMouth.rawValue
+                photoEditorStartInCrop = true
+                editingPhotoMouth = true
+            }
+            return
+        }
+        model.loadDroppedFile(url)
+    }
+
     private var videoWorkspace: some View {
         ZStack {
-            if model.showsVideo { Color.black }
-            else { StudioTheme.canvas.overlay { StudioTheme.stageLight } }
+            StageAmbientBackdrop(model: model, showsVideo: model.showsVideo, focusStage: focusStage)
             if model.showsVideo || (!model.loadingMedia && (model.mediaReady || !model.lyrics.lines.isEmpty)) {
                 GeometryReader { stage in
                     VStack(spacing: 0) {
                         if model.showsVideo {
-                            MovieSurface(player: model.player).frame(maxHeight: .infinity)
+                            MovieSurface(player: model.player)
+                                .frame(maxHeight: .infinity)
+                        } else if visualMode == .flowerMascot {
+                            let hasLyrics = !model.lyrics.lines.isEmpty
+                            FlowerSingerView(model: model, mini: false, focusStage: focusStage)
+                                .frame(height: hasLyrics
+                                       ? min(focusStage ? 290 : 228, max(164, stage.size.height * (focusStage ? 0.42 : 0.41)))
+                                       : min(focusStage ? 340 : 270, max(190, stage.size.height * 0.54)))
+                                .frame(maxWidth: .infinity)
+                                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                        } else if visualMode == .photoMouth {
+                            let hasLyrics = !model.lyrics.lines.isEmpty
+                            PhotoMouthSingerView(model: model, store: photoMouth, mini: false, focusStage: focusStage,
+                                                 openEditor: { photoEditorStartInCrop = false; editingPhotoMouth = true },
+                                                 pickPhoto: pickStagePhoto)
+                                .frame(height: hasLyrics
+                                       ? min(focusStage ? 300 : 236, max(168, stage.size.height * (focusStage ? 0.43 : 0.42)))
+                                       : min(focusStage ? 360 : 280, max(196, stage.size.height * 0.56)))
+                                .frame(maxWidth: .infinity)
+                                .transition(.opacity.combined(with: .scale(scale: 0.96)))
                         }
                         if !model.lyrics.lines.isEmpty || !model.showsVideo {
-                            LyricDisplay(model: model, compact: model.showsVideo, searchLyrics: openLyricSearch)
-                                .frame(height: model.showsVideo ? min(276, max(180, stage.size.height * 0.44)) : nil)
-                                .background(model.showsVideo ? StudioTheme.canvas : .clear)
+                            let compactLyrics = model.showsVideo || visualMode.hasCharacter
+                            let upperFocusLyrics = !model.showsVideo && visualMode.hasCharacter
+                            StageLyricDisplay(model: model, compact: compactLyrics, focusStage: focusStage,
+                                              upperFocus: upperFocusLyrics, searchLyrics: openLyricSearch)
+                                .frame(height: model.showsVideo ? min(focusStage ? 310 : 276, max(180, stage.size.height * (focusStage ? 0.42 : 0.44))) : nil)
+                                .background {
+                                    if model.showsVideo {
+                                        LinearGradient(
+                                            stops: [
+                                                .init(color: StudioTheme.canvas.opacity(0.15), location: 0),
+                                                .init(color: StudioTheme.canvas.opacity(0.76), location: 0.22),
+                                                .init(color: StudioTheme.canvas.opacity(0.92), location: 1)
+                                            ],
+                                            startPoint: .top,
+                                            endPoint: .bottom
+                                        )
+                                    }
+                                }
+                        }
+                        if model.microphoneEnabled || model.isTestingMic {
+                            VocalEnergyRibbon(model: model, compact: model.showsVideo, focusStage: focusStage)
+                                .padding(.bottom, 6)
+                                .transition(.opacity)
                         }
                     }
-                    .padding(.top, model.showsVideo ? 0 : 50)
+                    .padding(.top, model.showsVideo ? 0 : 48)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             } else {
-                VStack(spacing: 18) {
+                VStack(spacing: 16) {
                     if model.loadingMedia {
                         if model.preparingPitch {
                             ProgressView(value: model.pitchProgress).frame(width: 180)
@@ -192,22 +299,78 @@ struct ContentView: View {
                             Text("正在准备歌曲…").foregroundStyle(.secondary)
                         }
                     } else {
-                        Image(systemName: "music.note").font(.system(size: 52, weight: .ultraLight)).foregroundStyle(accent.opacity(0.8))
+                        if visualMode == .flowerMascot {
+                            FlowerSingerView(model: model, mini: false, focusStage: focusStage)
+                                .frame(width: focusStage ? 320 : 250, height: focusStage ? 280 : 220)
+                                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                        } else if visualMode == .photoMouth {
+                            PhotoMouthSingerView(model: model, store: photoMouth, mini: false, focusStage: focusStage,
+                                                 openEditor: { photoEditorStartInCrop = false; editingPhotoMouth = true },
+                                                 pickPhoto: pickStagePhoto)
+                                .frame(maxWidth: focusStage ? 460 : 380)
+                                .frame(height: focusStage ? 290 : 230)
+                                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                        } else {
+                            ZStack {
+                                Circle()
+                                    .fill(StudioTheme.accent.opacity(0.08))
+                                    .frame(width: 96, height: 96)
+                                Image(systemName: "music.note")
+                                    .font(.system(size: 46, weight: .ultraLight))
+                                    .foregroundStyle(StudioTheme.action)
+                            }
+                        }
                         VStack(spacing: 8) {
-                            Text("导入伴奏，开始录唱").font(.system(size: 24, weight: .medium))
+                            Text("导入伴奏，开始录唱").font(.system(size: 24, weight: .medium, design: .rounded))
                             Text("搭配 MV 画面，或使用 LRC 同步歌词").font(.system(size: 13)).foregroundStyle(.secondary)
                         }
-                        Text("拖入音频、MV 或 LRC 文件").font(.system(size: 10)).foregroundStyle(.tertiary)
+                        Text("拖入音频、MV、LRC 或照片文件").font(.system(size: 10)).foregroundStyle(.tertiary)
+                    }
+                }
+                .overlay(alignment: .bottom) {
+                    if model.microphoneEnabled || model.isTestingMic {
+                        VocalEnergyRibbon(model: model, compact: false, focusStage: focusStage)
+                            .padding(.bottom, 10)
                     }
                 }
             }
+            if model.showsVideo && visualMode.hasCharacter {
+                VStack {
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        if visualMode == .flowerMascot {
+                            FlowerSingerView(model: model, mini: true, focusStage: focusStage)
+                                .frame(width: 118, height: 118)
+                                .background(.ultraThinMaterial.opacity(0.32), in: Circle())
+                                .overlay { Circle().strokeBorder(StudioTheme.separator) }
+                                .padding(.trailing, 18)
+                                .padding(.bottom, (model.microphoneEnabled || model.isTestingMic) ? 34 : 14)
+                                .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                        } else if visualMode == .photoMouth, photoMouth.image != nil {
+                            PhotoMouthSingerView(model: model, store: photoMouth, mini: true, focusStage: focusStage,
+                                                 openEditor: { editingPhotoMouth = true }, pickPhoto: pickStagePhoto)
+                                .frame(width: 124, height: 124)
+                                .padding(.trailing, 18)
+                                .padding(.bottom, (model.microphoneEnabled || model.isTestingMic) ? 34 : 14)
+                                .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                        }
+                    }
+                }
+                .allowsHitTesting(false)
+            }
             VStack {
-                HStack {
-                    Label(model.showsVideo ? "MV" : "歌词", systemImage: model.showsVideo ? "film" : "text.alignleft")
+                HStack(spacing: 10) {
+                    Label(model.showsVideo ? "MV" : visualMode == .flowerMascot ? "花小梨舞台" : visualMode == .photoMouth ? "照片舞台" : "歌词",
+                          systemImage: model.showsVideo ? "film" : visualMode.hasCharacter ? visualMode.icon : "text.alignleft")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(model.showsVideo ? .white : accent)
                         .padding(.horizontal, 8).padding(.vertical, 5)
-                        .background(model.showsVideo ? .black.opacity(0.6) : accent.opacity(0.09), in: Capsule())
+                        .background(model.showsVideo ? .black.opacity(0.6) : accent.opacity(0.11), in: Capsule())
+                    if model.microphoneEnabled {
+                        VocalZoneBadge(meter: model.meter, isRecording: model.isRecording)
+                            .transition(.opacity)
+                    }
                     Spacer()
                     if !model.lyrics.lines.isEmpty {
                         Text(String(format: "歌词延后 %+.2f s", model.lyricDelay))
@@ -217,6 +380,7 @@ struct ContentView: View {
                             .disabled(model.busy)
                             .help("正值让歌词晚出现，负值让歌词早出现")
                     }
+                    stageModeControls
                 }
                 Spacer()
             }.padding(20)
@@ -228,14 +392,80 @@ struct ContentView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(reduceMotion ? nil : StudioTheme.quick, value: isDropping)
+        .animation(reduceMotion ? nil : StudioTheme.quick, value: model.microphoneEnabled)
+        .animation(reduceMotion ? nil : StudioTheme.stageSpring, value: visualModeRaw)
         .overlay { countdownOverlay }
         .onDrop(of: [UTType.fileURL], isTargeted: $isDropping) { providers in
             guard !model.busy, !model.loadingMedia, let provider = providers.first else { return false }
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
                 guard let url else { return }
-                Task { @MainActor in model.loadDroppedFile(url) }
+                Task { @MainActor in handleDroppedFile(url) }
             }
             return true
+        }
+    }
+
+    private var stageModeControls: some View {
+        HStack(spacing: 6) {
+            HStack(spacing: 2) {
+                ForEach(StageVisualMode.allCases) { mode in
+                    let selected = visualMode == mode
+                    Button {
+                        visualModeRaw = mode.rawValue
+                    } label: {
+                        Label(mode.shortLabel, systemImage: mode.icon)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(selected ? StudioTheme.lyricGlow : .secondary)
+                            .padding(.horizontal, 8).padding(.vertical, 4)
+                            .background(selected ? accent.opacity(0.22) : .clear, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .help("切换到「\(mode.label)」")
+                }
+            }
+            .padding(2)
+            .background(Color.white.opacity(0.06), in: Capsule())
+            .overlay { Capsule().strokeBorder(StudioTheme.separator) }
+
+            Button {
+                toggleFocusStage(!focusStage)
+            } label: {
+                Label(focusStage ? "退出舞台" : "舞台模式",
+                      systemImage: focusStage ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(focusStage ? StudioTheme.lyricGlow : .secondary)
+                    .padding(.horizontal, 9).padding(.vertical, 5)
+                    .background(focusStage ? accent.opacity(0.20) : Color.white.opacity(0.07), in: Capsule())
+                    .overlay {
+                        Capsule().strokeBorder(focusStage ? accent.opacity(0.45) : StudioTheme.separator)
+                    }
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut("\\", modifiers: .command)
+            .help(focusStage ? "退出专注舞台模式（⌘\\ 或 Esc）" : "收起侧栏进入专注舞台模式（⌘\\）")
+
+            Menu {
+                Toggle("开始录音时自动进入舞台模式", isOn: $autoFocusStageOnRecord)
+                Divider()
+                Button("上传舞台照片…", systemImage: "photo.badge.plus", action: pickStagePhoto)
+                if photoMouth.image != nil {
+                    Button("裁剪照片与调整嘴型…", systemImage: "crop") {
+                        visualModeRaw = StageVisualMode.photoMouth.rawValue
+                        editingPhotoMouth = true
+                    }
+                }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(autoFocusStageOnRecord ? accent : .secondary)
+                    .frame(width: 24, height: 22)
+                    .background(autoFocusStageOnRecord ? accent.opacity(0.14) : Color.white.opacity(0.06), in: Circle())
+                    .overlay { Circle().strokeBorder(StudioTheme.separator) }
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("舞台视觉选项")
         }
     }
 
@@ -575,192 +805,6 @@ struct ContentView: View {
                 Text(label).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
             }
             Slider(value: value, in: range).controlSize(.mini)
-        }
-    }
-}
-
-private struct LyricDisplay: View {
-    @ObservedObject var model: SessionModel
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    let compact: Bool
-    let searchLyrics: () -> Void
-    @State private var followsPlayback = true
-
-    private struct ScrollLayout: Equatable {
-        let recording: Bool
-        let height: CGFloat
-    }
-
-    private var rowHeight: CGFloat { compact ? 33 : 43 }
-
-    private var activeID: Int? {
-        guard let index = model.currentLyricIndex else { return nil }
-        return model.lyrics.lines[index].id
-    }
-
-    var body: some View {
-        if model.lyrics.lines.isEmpty {
-            VStack(spacing: 18) {
-                Image(systemName: "text.alignleft").font(.system(size: 32, weight: .light)).foregroundStyle(StudioTheme.action)
-                Text(model.librarySong?.title ?? "导入歌词，跟着伴奏唱").font(.system(size: 28, weight: .medium))
-                if let song = model.librarySong { Text(song.artist).font(.system(size: 15)).foregroundStyle(.secondary) }
-                Text(model.librarySong?.lyricStatus ?? "支持带时间戳的 LRC 歌词，按句同步高亮")
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
-                HStack(spacing: 10) {
-                    Button("导入 LRC 歌词") { model.importLyrics() }.disabled(model.busy)
-                    Button("从 LRCLIB 搜索", action: searchLyrics).disabled(!model.canSearchLyrics)
-                }
-            }.frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            ScrollViewReader { proxy in
-                VStack(spacing: 0) {
-                    HStack {
-                        Text(model.isRecording ? "录制中" : model.mediaReady ? "滚动查看 · 点击歌词跳转" : "导入伴奏后开始同步歌词")
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        if model.isRecording || followsPlayback {
-                            Label("跟随播放", systemImage: "scope").foregroundStyle(.secondary)
-                        } else {
-                            Button {
-                                followsPlayback = true
-                                scrollToCurrent(using: proxy, animated: true)
-                            } label: {
-                                Label("回到当前句", systemImage: "scope")
-                            }.buttonStyle(.plain).foregroundStyle(accent)
-                        }
-                    }
-                    .font(.system(size: 11, weight: .medium))
-                    .padding(.horizontal, 14).frame(height: 30)
-                    Divider()
-                    lyricList(using: proxy, recording: model.isRecording)
-                }
-                .padding(.horizontal, compact ? 8 : 14)
-                .onChange(of: activeID) {
-                    if model.isRecording || followsPlayback { scrollToCurrent(using: proxy, animated: true) }
-                }
-                .onChange(of: model.lyrics.lines) {
-                    followsPlayback = true
-                    scrollToCurrent(using: proxy, animated: false)
-                }
-            }
-        }
-    }
-
-    private func lyricList(using proxy: ScrollViewProxy, recording: Bool) -> some View {
-        let lines = model.lyrics.lines
-        return GeometryReader { viewport in
-            // Leave enough room for even the first and last lines to reach the center.
-            let verticalInset = recording ? max(6, (viewport.size.height - rowHeight) / 2) : 6
-            ScrollView {
-                LazyVStack(spacing: 4) {
-                    ForEach(lines) { line in
-                        LyricRow(model: model, line: line, compact: compact) {
-                            let previousID = activeID
-                            model.seekToLyric(line)
-                            followsPlayback = true
-                            if activeID == previousID { scrollToCurrent(using: proxy, animated: true) }
-                        }
-                        .id(line.id)
-                    }
-                }.padding(.horizontal, 10).padding(.vertical, verticalInset)
-            }
-            .scrollDisabled(recording)
-            .background {
-                LyricScrollInput { if !model.isRecording { followsPlayback = false } }
-                    .allowsHitTesting(false).accessibilityHidden(true)
-            }
-            .accessibilityLabel("同步歌词")
-            .task(id: ScrollLayout(recording: recording, height: recording ? viewport.size.height : 0)) {
-                await Task.yield()
-                guard !Task.isCancelled else { return }
-                if recording { followsPlayback = true }
-                if followsPlayback { scrollToCurrent(using: proxy, animated: false) }
-            }
-        }
-    }
-
-    private func scrollToCurrent(using proxy: ScrollViewProxy, animated: Bool) {
-        guard let id = activeID ?? model.lyrics.lines.first?.id else { return }
-        if animated && !reduceMotion { withAnimation(.easeOut(duration: 0.22)) { proxy.scrollTo(id, anchor: .center) } }
-        else { proxy.scrollTo(id, anchor: .center) }
-    }
-}
-
-private struct LyricRow: View {
-    @ObservedObject var model: SessionModel
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    let line: LyricLine
-    let compact: Bool
-    let seek: () -> Void
-
-    var body: some View {
-        let recording = model.isRecording
-        let active = model.currentLyricIndex.map { model.lyrics.lines[$0].id } == line.id
-        let time = preciseTimeLabel(max(0, line.time + model.lyricDelay))
-        if recording || line.text.isEmpty {
-            label(time: time, active: active, recording: recording)
-        } else {
-            Button(action: seek) { label(time: time, active: active, recording: recording) }
-                .buttonStyle(.plain)
-                .disabled(model.busy || !model.mediaReady)
-                .help("跳到 \(time)")
-        }
-    }
-
-    private func label(time: String, active: Bool, recording: Bool) -> some View {
-        let emphasized = active && recording
-        return HStack(spacing: 12) {
-            Text(time).font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(active ? StudioTheme.lyric : Color.secondary)
-                .frame(width: 48, alignment: .leading).accessibilityHidden(true)
-            Text(line.text.isEmpty ? "间奏" : line.text)
-                .font(.system(size: compact ? 16 : 21, weight: active ? .semibold : .regular))
-                .foregroundStyle(active ? StudioTheme.lyric : Color.secondary)
-                .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
-                .scaleEffect(emphasized ? 1.15 : 1)
-                .animation(reduceMotion ? nil : StudioTheme.quick, value: emphasized)
-                .padding(.horizontal, recording ? 10 : 0)
-                .frame(maxWidth: .infinity)
-            Color.clear.frame(width: 48, height: 0).accessibilityHidden(true)
-        }
-        .padding(.horizontal, 10).padding(.vertical, recording ? 8 : 5)
-        .frame(minHeight: compact ? 33 : 43)
-        .contentShape(Rectangle())
-        .accessibilityAddTraits(active ? .isSelected : [])
-        .animation(reduceMotion ? nil : StudioTheme.quick, value: active)
-    }
-
-}
-
-/// Observe input in this viewport only; programmatic scrolls should keep following.
-private struct LyricScrollInput: NSViewRepresentable {
-    let onBrowse: () -> Void
-
-    func makeNSView(context: Context) -> View { View() }
-    func updateNSView(_ view: View, context: Context) { view.onBrowse = onBrowse }
-
-    final class View: NSView {
-        var onBrowse: (() -> Void)?
-        private var monitor: Any?
-
-        override func viewWillMove(toWindow newWindow: NSWindow?) {
-            if let monitor { NSEvent.removeMonitor(monitor); self.monitor = nil }
-            super.viewWillMove(toWindow: newWindow)
-        }
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            guard window != nil else { return }
-            monitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel, .leftMouseDown]) { [weak self] event in
-                guard let self, event.window === self.window else { return event }
-                let point = self.convert(event.locationInWindow, from: nil)
-                guard self.visibleRect.contains(point) else { return event }
-                // The trailing edge includes the scrollbar; regular row clicks are handled by SwiftUI.
-                if event.type == .scrollWheel ? event.momentumPhase.isEmpty : point.x >= self.bounds.maxX - 15 {
-                    self.onBrowse?()
-                }
-                return event
-            }
         }
     }
 }

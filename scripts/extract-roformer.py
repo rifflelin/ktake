@@ -4,6 +4,7 @@ from pathlib import Path
 
 from separation_model_files import cached_model_file
 from separation_progress import ExtractionProgress
+from separation_stems import write_stems
 
 
 MODEL_URL = (
@@ -22,7 +23,7 @@ def download_model(directory):
         cached_model_file(directory, name, MODEL_URL + name, checksum)
 
 
-def extract(source, destination, model_dir, progress_path=None):
+def extract(source, destination, model_dir, progress_path=None, vocal_path=None):
     progress = ExtractionProgress(progress_path)
     os.environ["HF_HUB_OFFLINE"] = "1"
     progress.update("loadingModel")
@@ -52,12 +53,8 @@ def extract(source, destination, model_dir, progress_path=None):
             instrumental[-hop:] *= 1 - ramp
         accompaniment[start:start + len(segment)] += instrumental
 
-    peak = float(np.max(np.abs(accompaniment)))
-    if not np.isfinite(peak):
-        raise ValueError("Separation produced invalid audio samples")
-    if peak > 1:
-        accompaniment /= peak
-    sf.write(destination, accompaniment, rate, subtype="PCM_24")
+    progress.update("saving")
+    write_stems(audio, accompaniment, rate, destination, vocal_path)
 
 
 if __name__ == "__main__":

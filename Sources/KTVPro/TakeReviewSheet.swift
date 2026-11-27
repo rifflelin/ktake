@@ -20,6 +20,12 @@ private final class TakeReviewModel: ObservableObject {
     @Published private(set) var exportNotice = ""
     @Published private(set) var isPreparingEffects = false
     @Published private(set) var effectsNotice = ""
+    @Published private(set) var automaticResult: AutomaticTakeMix?
+    @Published private(set) var automaticPhase: AutomaticTakeMix.Phase?
+    @Published private(set) var automaticNotice = ""
+    @Published private(set) var listeningToAutomatic = false
+    @Published var applyAutomaticPitch = true
+    @Published var automaticVocalTrim: Float = 0
     @Published var mode: Mode = .dry { didSet { updateMix() } }
     @Published var vocal: Float = 1 { didSet { updateMix() } }
     @Published var backing: Float { didSet { updateMix() } }
@@ -71,6 +77,8 @@ private final class TakeReviewModel: ObservableObject {
     private var finishObserver: NSObjectProtocol?
     private var errorObserver: NSObjectProtocol?
     private var exportTask: Task<Void, Never>?
+    private var automaticTask: Task<Void, Never>?
+    private var automaticGeneration = UUID()
     private var initialized = false
 
     init(request: TakeReviewRequest) {
@@ -94,6 +102,7 @@ private final class TakeReviewModel: ObservableObject {
             installDry(at: 0)
             observePlayer()
         }
+        resetAutomatic()
         let dryPosition = max(0, position - (mix?.vocalStart ?? 0))
         let wasPlaying = isPlaying
         pause()
@@ -192,6 +201,7 @@ private final class TakeReviewModel: ObservableObject {
     }
 
     private func updateMix() {
+        guard !listeningToAutomatic else { return }
         let reviewLevels = TakeMixLevels(vocal: vocal, backing: backing, includesBacking: mode == .mix)
         player.volume = mix == nil && effectsPreview == nil ? vocal : 1
         player.currentItem?.audioMix = effectsPreview?.audioMix(reviewLevels, enabled: effects.enabled, reverb: effects.reverb)
@@ -229,6 +239,11 @@ private final class TakeReviewModel: ObservableObject {
     }
 
     private func installEffects(_ preview: TakeEffectsPreview, tone: VocalSettings) {
+        if listeningToAutomatic {
+            effectsPreview = preview
+            renderedTone = tone
+            return
+        }
         let playhead = position
         let resume = isPlaying
         player.pause()
@@ -247,6 +262,83 @@ private final class TakeReviewModel: ObservableObject {
         effectsTask?.cancel()
         effectsTask = nil
         isPreparingEffects = false
+    }
+
+    func renderAutomatic() {
+        guard let mix, hasMix, !isPreparing, !isExporting, automaticTask == nil else { return }
+        let generation = UUID()
+        let applyPitch = applyAutomaticPitch
+        let vocalTrim = automaticVocalTrim
+        automaticGeneration = generation
+        automaticNotice = ""
+        automaticPhase = .analysis
+        automaticTask = Task { [weak self] in
+            let report: @Sendable (AutomaticTakeMix.Phase) -> Void = { [weak self] phase in
+                Task { @MainActor [weak self] in
+                    guard let self, self.automaticGeneration == generation, self.automaticTask != nil else { return }
+                    self.automaticPhase = phase
+                }
+            }
+            do {
+                let result = try await AutomaticTakeMix.prepare(from: mix, applyPitch: applyPitch, vocalTrimDB: vocalTrim, progress: report)
+                guard let self, !Task.isCancelled, self.automaticGeneration == generation else { return }
+                self.automaticTask = nil
+                self.automaticPhase = nil
+                self.automaticResult = result
+                if result.usedSavedReference {
+                    self.automaticNotice = "已参考分离人声。"
+                } else if result.correctedPitch {
+                    self.automaticNotice = "已完成修音与混音。"
+                } else if result.pitch.comparedReference {
+                    self.automaticNotice = "已对照原唱，保留音高。"
+                } else {
+                    self.automaticNotice = "已完成混音，保留音高。"
+                }
+                self.mode = .mix
+                self.selectAutomatic(true)
+            } catch {
+                guard let self, !Task.isCancelled, self.automaticGeneration == generation else { return }
+                self.automaticTask = nil
+                self.automaticPhase = nil
+                self.automaticNotice = "自动混音失败：\(error.localizedDescription)"
+            }
+        }
+    }
+
+    func cancelAutomatic() {
+        automaticGeneration = UUID()
+        automaticTask?.cancel()
+        automaticTask = nil
+        automaticPhase = nil
+    }
+
+    func resetAutomatic() {
+        selectAutomatic(false)
+        cancelAutomatic()
+        automaticResult = nil
+        automaticNotice = ""
+    }
+
+    func selectAutomatic(_ selected: Bool) {
+        guard selected != listeningToAutomatic else { return }
+        let item: AVPlayerItem
+        if selected, let automaticResult {
+            item = AVPlayerItem(url: automaticResult.url)
+        } else if !selected, let mix {
+            item = AVPlayerItem(asset: effectsPreview?.asset ?? mix.asset)
+        } else {
+            return
+        }
+        let resume = isPlaying
+        let playhead = position
+        player.pause()
+        listeningToAutomatic = selected
+        player.replaceCurrentItem(with: item)
+        if selected { player.volume = 1 }
+        else { updateMix() }
+        if let auditionRange { item.forwardPlaybackEndTime = time(auditionRange.end + (mix?.vocalStart ?? 0)) }
+        movePlayhead(to: playhead)
+        if resume { player.play() }
     }
 
     private var levels: TakeMixLevels { TakeMixLevels(vocal: vocal, backing: backing) }
@@ -322,15 +414,18 @@ private final class TakeReviewModel: ObservableObject {
 
     func export() {
         guard let mix, !isPreparing, !isExporting else { return }
+        let automatic = listeningToAutomatic ? automaticResult : nil
         pause()
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.wav]
-        panel.nameFieldStringValue = request.vocalURL.deletingPathExtension().lastPathComponent +
-            (selectedPatchID == nil ? " - 混音.wav" : " - 补录混音.wav")
+        let version = selectedPatchID == nil ? "" : "补录"
+        let processing = automatic == nil ? "" : "自动"
+        panel.nameFieldStringValue = request.vocalURL.deletingPathExtension().lastPathComponent + " - \(version)\(processing)混音.wav"
         guard panel.runModal() == .OK, let destination = panel.url else { return }
         let resolved = destination.resolvingSymlinksInPath().standardizedFileURL.path
         let takeRoot = request.vocalURL.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL.path
-        let protectedSources = [request.backingURL, preparedBackingURL].compactMap { $0?.resolvingSymlinksInPath().standardizedFileURL.path }
+        let protectedSources = [request.backingURL, preparedBackingURL, request.originalMixURL, request.referenceVocalURL]
+            .compactMap { $0?.resolvingSymlinksInPath().standardizedFileURL.path }
         guard !resolved.hasPrefix(takeRoot + "/"), !protectedSources.contains(resolved) else {
             exportNotice = "请选择录音文件夹以外的位置，避免覆盖原始音频。"
             return
@@ -341,7 +436,8 @@ private final class TakeReviewModel: ObservableObject {
         exportTask = Task {
             defer { isExporting = false }
             do {
-                try await mix.exportWAV(to: destination, levels: settings)
+                if let automatic { try await automatic.exportWAV(to: destination) }
+                else { try await mix.exportWAV(to: destination, levels: settings) }
                 exportNotice = "已导出：\(destination.lastPathComponent)"
             } catch {
                 if !Task.isCancelled { exportNotice = "导出失败：\(error.localizedDescription)" }
@@ -352,11 +448,13 @@ private final class TakeReviewModel: ObservableObject {
     func close() {
         exportTask?.cancel()
         cancelEffectsPreparation()
+        cancelAutomatic()
         pause()
         if let timeObserver { player.removeTimeObserver(timeObserver); self.timeObserver = nil }
         if let finishObserver { NotificationCenter.default.removeObserver(finishObserver); self.finishObserver = nil }
         if let errorObserver { NotificationCenter.default.removeObserver(errorObserver); self.errorObserver = nil }
         player.replaceCurrentItem(with: nil)
+        automaticResult = nil
         effectsPreview = nil
     }
 }
@@ -380,13 +478,13 @@ struct TakeReviewSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 5) {
-                Text("录音回听").font(.title2.bold())
+                Text("回听与混音").font(.title2.bold())
                 Text(model.request.take.songName).font(.callout).foregroundStyle(.secondary).lineLimit(1)
             }
             Picker("回听模式", selection: $model.mode) {
                 Text(TakeReviewModel.Mode.dry.rawValue).tag(TakeReviewModel.Mode.dry)
                 Text(TakeReviewModel.Mode.mix.rawValue).tag(TakeReviewModel.Mode.mix)
-            }.pickerStyle(.segmented).labelsHidden().disabled(!model.hasMix || model.isPreparing)
+            }.pickerStyle(.segmented).labelsHidden().disabled(!model.hasMix || model.isPreparing || model.listeningToAutomatic)
             HStack(spacing: 12) {
                 Button { model.toggle() } label: {
                     Image(systemName: model.isPlaying ? "pause.fill" : "play.fill").frame(width: 26, height: 21)
@@ -405,12 +503,14 @@ struct TakeReviewSheet: View {
                 patchControls
             }
             Divider()
+            automaticControls
             VStack(spacing: 12) {
                 gainSlider("人声音量", value: $model.vocal).disabled(model.isExporting)
                 gainSlider("伴奏音量", value: $model.backing)
                     .disabled(!model.hasMix || model.mode == .dry || model.isExporting)
-            }
+            }.disabled(model.listeningToAutomatic)
             effectsControls
+                .disabled(model.listeningToAutomatic)
             HStack {
                 Text("人声对齐").font(.callout)
                 Spacer()
@@ -428,7 +528,7 @@ struct TakeReviewSheet: View {
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction).disabled(model.isExporting)
-                Button(model.isExporting ? "正在导出…" : "导出混音 WAV…") { model.export() }
+                Button(exportTitle) { model.export() }
                     .buttonStyle(.borderedProminent).disabled(!model.hasMix || model.isPreparing || model.isExporting)
             }
         }
@@ -438,6 +538,63 @@ struct TakeReviewSheet: View {
         .task(id: BuildKey(delay: model.offsetMS, version: model.selectedPatchID)) { await model.prepare() }
         .onDisappear { model.close() }
         .interactiveDismissDisabled(model.isExporting)
+    }
+
+    private var exportTitle: String {
+        if model.isExporting { return "正在导出…" }
+        return model.listeningToAutomatic ? "导出自动混音 WAV…" : "导出混音 WAV…"
+    }
+
+    private var automaticControls: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                if let phase = model.automaticPhase {
+                    ProgressView().controlSize(.small)
+                    Text(phase.rawValue).font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("取消处理") { model.cancelAutomatic() }
+                } else if let result = model.automaticResult {
+                    Picker("混音试听版本", selection: Binding(get: { model.listeningToAutomatic }, set: { model.selectAutomatic($0) })) {
+                        Text("原始回听").tag(false)
+                        Text("自动混音").tag(true)
+                    }.pickerStyle(.segmented).labelsHidden().fixedSize()
+                    Text(model.automaticNotice).font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    if !result.pitch.discrepancies.isEmpty {
+                        Menu("疑似错音 \(result.pitch.discrepancies.count) 处") {
+                            ForEach(result.pitch.discrepancies) { item in
+                                Button("\(preciseTimeLabel(item.start))  \(item.notesLabel)  \(item.corrected ? "已修音" : "待确认")") {
+                                    model.seek(to: max(0, item.start - 0.12))
+                                }
+                            }
+                        }.fixedSize()
+                    }
+                    Button("重新处理") { model.resetAutomatic() }
+                } else {
+                    Button(model.applyAutomaticPitch ? "自动修音与混音" : "自动混音") { model.renderAutomatic() }
+                        .disabled(!model.hasMix)
+                        .help("使用所选录音和对齐后的伴奏，在本机处理。")
+                    Toggle("修音", isOn: $model.applyAutomaticPitch).toggleStyle(.checkbox)
+                        .help("根据原唱音符和前后旋律判断偏差，点疑似错音可跳转复核。")
+                        .disabled(!model.hasMix)
+                    if !model.automaticNotice.isEmpty {
+                        Text(model.automaticNotice).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .disabled(model.isPreparing || model.isExporting)
+            if model.automaticPhase == nil, model.automaticResult == nil {
+                HStack {
+                    Text("自动混音人声")
+                    Slider(value: $model.automaticVocalTrim, in: -6...6, step: 0.5)
+                        .accessibilityLabel("自动混音人声增益微调")
+                    Text(String(format: "%+.1f dB", model.automaticVocalTrim)).monospacedDigit()
+                }
+                .font(.caption)
+                .disabled(!model.hasMix || model.isPreparing || model.isExporting)
+                .help("相对于自动平衡，调高或调低人声与它的混响。")
+            }
+        }
     }
 
     private var patchControls: some View {

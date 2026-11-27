@@ -223,6 +223,21 @@ final class SessionModel: ObservableObject {
         // AVPlayer can report an exact seek one 48 kHz tick before the requested time.
         lyrics.index(at: position - lyricDelay + 2.0 / Double(Self.playbackTimescale))
     }
+
+    /// High-frequency playback position for 60fps lyric sweep and stage animations without triggering @Published diffs.
+    func livePlaybackPosition() -> Double {
+        guard mediaReady, !loadingMedia else { return position }
+        if player.rate > 0 {
+            let seconds = player.currentTime().seconds
+            if seconds.isFinite { return min(max(0, seconds), max(duration, 0)) }
+        }
+        return position
+    }
+
+    /// High-frequency lyric clock aligned with lyricDelay.
+    func liveLyricSeconds() -> Double {
+        livePlaybackPosition() - lyricDelay + 2.0 / Double(Self.playbackTimescale)
+    }
     var showsVideo: Bool { mediaReady && mediaURL != nil && position < videoDuration }
     var hasSong: Bool { mediaURL != nil || accompanimentURL != nil }
     var canSearchLyrics: Bool { hasSong && !busy && !loadingMedia }
@@ -410,6 +425,15 @@ final class SessionModel: ObservableObject {
         guard let library = songLibraries[song.id] else { return nil }
         if song.musicDL != nil { return musicDLImporter?.availableAudio(for: song, library: library) }
         return try? library.url(song.accompaniment)
+    }
+
+    private func originalMix(for backing: URL?, songID: String?) -> URL? {
+        guard let backing, let songID, let song = songs.first(where: { $0.id == songID }) else { return nil }
+        let location = backing.resolvingSymlinksInPath().standardizedFileURL
+        guard extractedAccompaniments[songID]?.values.contains(where: {
+            $0.resolvingSymlinksInPath().standardizedFileURL == location
+        }) == true else { return nil }
+        return availableLibraryAudio(for: song)
     }
 
     func selectSong(_ id: String, audioVersion: LibraryAudioVersion? = nil) {
@@ -1269,7 +1293,8 @@ final class SessionModel: ObservableObject {
                             pitchSemitones: semitones, librarySongID: punch?.take.librarySongID ?? selectedSongID,
                             backingVolume: videoVolume, hasBacking: installedSong?.hasAudio == true && mediaReady,
                             parentTakeID: punch?.take.id, punchRange: punch?.sourceRange,
-                            recordedLyricDelay: lyricDelay, recordedEffects: vocalSettings)
+                            recordedLyricDelay: lyricDelay, recordedEffects: vocalSettings,
+                            originalMixPath: punch?.take.originalMixPath ?? originalMix(for: accompanimentURL, songID: selectedSongID)?.path)
             let writer = try RecordingWriter(url: take.url(in: takesDirectory), format: format)
             do { try take.save(in: takesDirectory) } catch {
                 writer.finish { _ in }
@@ -1400,9 +1425,18 @@ final class SessionModel: ObservableObject {
             guard child.parentTakeID == take.id, child.duration > 0, let range = child.punchRange, range.isValid else { return nil }
             return TakePatch(take: child, url: child.url(in: takesDirectory), range: range)
         }
+        let savedOriginal = take.originalMixPath.map { Take.recordedMediaURL($0) }
+            .flatMap { FileManager.default.isReadableFile(atPath: $0.path) ? $0 : nil }
+        let backing = take.accompanimentPath.map { Take.recordedMediaURL($0) }
+        let original = savedOriginal ?? originalMix(for: backing, songID: take.librarySongID)
+        let isolated = backing.map { AccompanimentExtractor.referenceVocalURL(for: $0) }.flatMap { url -> URL? in
+            guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+                  values.isRegularFile == true, values.isSymbolicLink == false else { return nil }
+            return url
+        }
         return TakeReviewRequest(take: take, vocalURL: take.url(in: takesDirectory), outputUID: outputDevice?.uid,
                                  versions: versions, microphoneReady: microphoneEnabled && audio.isRunning,
-                                 reviewEffects: settings)
+                                 reviewEffects: settings, originalMixURL: original, referenceVocalURL: isolated)
     }
 
     func endTakeReview() {

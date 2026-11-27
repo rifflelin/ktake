@@ -6,6 +6,7 @@ from pathlib import Path
 
 from separation_model_files import cached_model_file
 from separation_progress import ExtractionProgress
+from separation_stems import write_stems
 
 
 WEIGHTS_NAME = "small_karaoke_gaboxaufr.ckpt"
@@ -62,7 +63,7 @@ def download_model(directory):
         convert_weights(checkpoint).replace(directory / "model.safetensors")
 
 
-def extract(source, destination, model_dir, progress_path=None):
+def extract(source, destination, model_dir, progress_path=None, vocal_path=None):
     progress = ExtractionProgress(progress_path)
     progress.update("preparingModel")
 
@@ -102,14 +103,11 @@ def extract(source, destination, model_dir, progress_path=None):
 
     progress.update("separating")
     with progress.report_batches(mdxc_separator, "tqdm"):
-        accompaniment = separator._demix_mlx(audio.T)["Instrumental"].T
-    if accompaniment.shape != audio.shape or not np.isfinite(accompaniment).all():
-        raise ValueError("Small Karaoke produced invalid audio")
-    peak = float(np.max(np.abs(accompaniment)))
-    if peak > 1:
-        accompaniment /= peak
+        stems = separator._demix_mlx(audio.T)
+    vocals = stems.get("Vocals")
     progress.update("saving")
-    sf.write(destination, accompaniment, rate, subtype="PCM_24")
+    write_stems(audio, stems["Instrumental"].T, rate, destination, vocal_path,
+                vocals=None if vocals is None else vocals.T)
 
 
 if __name__ == "__main__":

@@ -123,6 +123,7 @@ struct Take: Identifiable, Codable {
     /// Kept for compatibility with takes saved by the reverb-only version.
     var recordedReverb: Float? = nil
     var recordedEffects: VocalSettings? = nil
+    var originalMixPath: String? = nil
 
     func quickPlaybackEffects(fallback: VocalSettings) -> VocalSettings {
         if let recordedEffects { return recordedEffects.bounded }

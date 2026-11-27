@@ -11,17 +11,21 @@ enum StudioTheme {
 
     static let accent = Color(red: 1, green: 0.65, blue: 0.76)
     static let lyric = Color(red: 1, green: 0.83, blue: 0.72)
+    static let lyricGlow = Color(red: 1, green: 0.94, blue: 0.88)
     static let amber = Color(red: 1, green: 0.77, blue: 0.42)
     static let live = Color(red: 1, green: 0.43, blue: 0.51)
+    static let lavender = Color(red: 0.74, green: 0.58, blue: 1)
+    static let violet = Color(red: 0.48, green: 0.27, blue: 0.79)
+    static let rose = Color(red: 1, green: 0.48, blue: 0.67)
     static let quick = Animation.easeOut(duration: 0.17)
+    static let stageSpring = Animation.spring(duration: 0.34, bounce: 0.08)
 
-    private static let purple = Color(red: 0.48, green: 0.27, blue: 0.79)
     static let action = LinearGradient(
         colors: [amber, Color(red: 1, green: 0.57, blue: 0.64), Color(red: 0.77, green: 0.64, blue: 1)],
         startPoint: .topLeading, endPoint: .bottomTrailing
     )
     static let stageLight = RadialGradient(
-        colors: [purple.opacity(0.18), purple.opacity(0.05), .clear],
+        colors: [violet.opacity(0.18), violet.opacity(0.05), .clear],
         center: .top, startRadius: 0, endRadius: 570
     )
     static let appIcon = Bundle.main.url(forResource: "AppIcon", withExtension: "icns")

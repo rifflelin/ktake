@@ -15,6 +15,8 @@ struct TakeReviewRequest: Identifiable {
     var versions: [TakePatch] = []
     var microphoneReady = false
     var reviewEffects = VocalSettings(enabled: false)
+    var originalMixURL: URL?
+    var referenceVocalURL: URL?
     var id: UUID { take.id }
     var backingURL: URL? {
         guard take.hasBacking != false, let path = take.accompanimentPath ?? take.mediaPath else { return nil }
@@ -36,11 +38,22 @@ struct TakeMix: @unchecked Sendable {
     private let vocalTrack: AVCompositionTrack
     private let backingTrack: AVCompositionTrack?
     private let replacement: Replacement?
+    private let reference: ReferenceWindow?
 
     private struct Replacement {
         let track: AVCompositionTrack
         let start: Double
         let end: Double
+    }
+
+    private struct ReferenceWindow {
+        let original: URL?
+        let isolated: URL?
+        let instrumental: URL
+        let sourceOffset: CMTime
+        let mixStart: CMTime
+        let length: CMTime
+        let semitones: Int
     }
 
     static func build(for request: TakeReviewRequest, backingURL: URL?, vocalDelayMS: Int, patch: TakePatch? = nil) async throws -> TakeMix {
@@ -69,6 +82,7 @@ struct TakeMix: @unchecked Sendable {
         }
         try vocalDestination.insertTimeRange(dryRange, of: dryTrack, at: time(voiceAt))
         let backingDestination: AVMutableCompositionTrack?
+        var reference: ReferenceWindow?
         if let backingURL {
             let backing = AVURLAsset(url: backingURL, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
             guard let sourceTrack = try await backing.loadTracks(withMediaType: .audio).first else {
@@ -85,6 +99,11 @@ struct TakeMix: @unchecked Sendable {
             try track.insertTimeRange(CMTimeRange(start: CMTimeAdd(sourceRange.start, offset), duration: duration),
                                       of: sourceTrack, at: time(backingAt))
             backingDestination = track
+            if let instrumental = request.backingURL, request.originalMixURL != nil || request.referenceVocalURL != nil {
+                reference = ReferenceWindow(original: request.originalMixURL, isolated: request.referenceVocalURL,
+                                            instrumental: instrumental, sourceOffset: offset,
+                                            mixStart: time(backingAt), length: duration, semitones: request.take.pitchSemitones ?? 0)
+            }
         } else { backingDestination = nil }
         var replacement: Replacement?
         if let patch {
@@ -109,7 +128,8 @@ struct TakeMix: @unchecked Sendable {
             replacement = Replacement(track: destination, start: voiceAt + start, end: voiceAt + start + length.seconds)
         }
         return TakeMix(asset: composition, duration: voiceAt + drySeconds, vocalStart: voiceAt,
-                       vocalTrack: vocalDestination, backingTrack: backingDestination, replacement: replacement)
+                       vocalTrack: vocalDestination, backingTrack: backingDestination, replacement: replacement,
+                       reference: reference)
     }
 
     func audioMix(_ levels: TakeMixLevels, processedTrack: AVCompositionTrack? = nil, wetTrack: AVCompositionTrack? = nil,
@@ -173,6 +193,37 @@ struct TakeMix: @unchecked Sendable {
     func writeVocalStem(to destination: URL) throws {
         try WAVRenderer.write(asset: asset, tracks: vocalTracks, mix: audioMix(TakeMixLevels(), voiceOnly: true),
                               to: destination, sampleRate: 48_000, channels: 1, duration: duration)
+    }
+
+    func writeBackingStem(to destination: URL) throws {
+        guard let backingTrack else { throw AppFailure(message: "自动混音需要这次录音使用的伴奏。") }
+        try WAVRenderer.write(asset: asset, tracks: [backingTrack], to: destination,
+                              sampleRate: 48_000, channels: 2, duration: duration)
+    }
+
+    func writeReferenceStems(vocalSource: URL, instrumental: URL, sampleRate: Int32, isolated: Bool) async throws -> Int? {
+        guard let reference, let sourceURL = isolated ? reference.isolated : reference.original,
+              sourceURL.resolvingSymlinksInPath() != reference.instrumental.resolvingSymlinksInPath() else { return nil }
+        let originalAsset = AVURLAsset(url: sourceURL, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
+        let instrumentalAsset = AVURLAsset(url: reference.instrumental)
+        guard let source = try await originalAsset.loadTracks(withMediaType: .audio).first,
+              let backing = try await instrumentalAsset.loadTracks(withMediaType: .audio).first else { return nil }
+        let originalRange = try await source.load(.timeRange)
+        let instrumentalRange = try await backing.load(.timeRange)
+        guard abs(originalRange.duration.seconds - instrumentalRange.duration.seconds) < 0.12 else { return nil }
+
+        for (track, range, destination) in [(source, originalRange, vocalSource), (backing, instrumentalRange, instrumental)] {
+            try Task.checkCancellation()
+            let length = CMTimeMinimum(reference.length, CMTimeSubtract(range.duration, reference.sourceOffset))
+            guard length.seconds > 0 else { return nil }
+            let composition = AVMutableComposition()
+            guard let stem = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else { return nil }
+            let start = CMTimeAdd(range.start, reference.sourceOffset)
+            try stem.insertTimeRange(CMTimeRange(start: start, duration: length), of: track, at: reference.mixStart)
+            try WAVRenderer.write(asset: composition, tracks: [stem], to: destination,
+                                  sampleRate: sampleRate, channels: 2, duration: duration)
+        }
+        return reference.semitones
     }
 
     private static func time(_ seconds: Double) -> CMTime { CMTime(seconds: seconds, preferredTimescale: 48_000) }

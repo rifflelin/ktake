@@ -138,6 +138,10 @@ enum AccompanimentExtractor {
         try await withTaskCancellationHandler { try await work.value } onCancel: { work.cancel() }
     }
 
+    static func referenceVocalURL(for accompaniment: URL) -> URL {
+        accompaniment.deletingPathExtension().appendingPathExtension("vocals").appendingPathExtension("wav")
+    }
+
     static func extract(source: URL, destination: URL, engineDirectory: URL, model: Model, weights: URL,
                         progress: @escaping @MainActor @Sendable (Progress) -> Void = { _ in },
                         status: @escaping @Sendable (String) -> Void) async throws {
@@ -165,21 +169,55 @@ enum AccompanimentExtractor {
 
             let script = try modelScript(model)
             let output = staging.appendingPathComponent("instrumental.wav")
+            let voice = staging.appendingPathComponent("vocals.wav")
             let progressFile = staging.appendingPathComponent("progress.json")
-            let arguments = ["-E", "-s", "-B", script.path, input.path, output.path, weights.path, progressFile.path]
+            let arguments = ["-E", "-s", "-B", script.path, input.path, output.path, weights.path, progressFile.path, voice.path]
             let executable = try await runtime(for: model, in: engineDirectory, staging: staging, status: status)
             try await run(executable, arguments, in: staging, errorTitle: "\(model.rawValue) 未能完成提取",
                           progress: (file: progressFile, update: progress))
             let result = try AVAudioFile(forReading: output)
+            let vocalResult = try AVAudioFile(forReading: voice)
             let rate = result.processingFormat.sampleRate
             let seconds = Double(result.length) / rate
-            guard result.length > 0, seconds.isFinite, abs(song.duration - seconds) < 0.1 else {
-                throw AppFailure(message: "提取结果与原曲时长不一致，未保存伴奏。")
+            guard result.length > 0, seconds.isFinite, abs(song.duration - seconds) < 0.1,
+                  result.length == vocalResult.length, rate == vocalResult.processingFormat.sampleRate,
+                  result.processingFormat.channelCount == 2, vocalResult.processingFormat.channelCount == 2 else {
+                throw AppFailure(message: "分离音轨与原曲时间线不一致。")
             }
-            try Task.checkCancellation()
-            try files.moveItem(at: output, to: destination)
+            try publish(accompaniment: output, voice: voice, to: destination)
         }
         try await withTaskCancellationHandler { try await work.value } onCancel: { work.cancel() }
+    }
+
+    private static func publish(accompaniment: URL, voice: URL, to destination: URL) throws {
+        let files = FileManager.default
+        let folder = destination.deletingLastPathComponent()
+        let lock = folder.appendingPathComponent(".KTake-stem-lock")
+        let descriptor = Darwin.open(lock.path, O_CREAT | O_RDWR | O_NOFOLLOW, mode_t(0o600))
+        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { close(descriptor) }
+        while flock(descriptor, LOCK_EX | LOCK_NB) != 0 {
+            guard errno == EWOULDBLOCK || errno == EINTR else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            try Task.checkCancellation()
+            Thread.sleep(forTimeInterval: 0.025)
+        }
+        try Task.checkCancellation()
+        guard !files.fileExists(atPath: destination.path) else { throw AppFailure(message: "这首歌的分离伴奏已存在。") }
+        let vocalDestination = referenceVocalURL(for: destination)
+        // Publish accompaniment last. The library only exposes completed accompaniment files.
+        if files.fileExists(atPath: vocalDestination.path) {
+            _ = try files.replaceItemAt(vocalDestination, withItemAt: voice)
+        } else {
+            try files.moveItem(at: voice, to: vocalDestination)
+        }
+        do {
+            try files.moveItem(at: accompaniment, to: destination)
+        } catch {
+            try? files.removeItem(at: vocalDestination)
+            throw error
+        }
     }
 
     private static func modelScript(_ model: Model) throws -> URL {

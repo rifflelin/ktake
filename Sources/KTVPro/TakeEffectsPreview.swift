@@ -38,8 +38,8 @@ final class TakeEffectsPreview: @unchecked Sendable {
                 if !completed { try? files.removeItem(at: directory) }
             }
             try base.writeVocalStem(to: dry)
-            try renderVocal(from: dry, to: processed, settings: settings, wetReverbOnly: false)
-            try renderVocal(from: processed, to: wet, settings: settings, wetReverbOnly: true)
+            try renderVocal(from: dry, to: processed, settings: settings, mode: .tone)
+            try renderVocal(from: processed, to: wet, settings: settings, mode: .wetReverb)
             try files.removeItem(at: dry)
             try Task.checkCancellation()
 
@@ -68,11 +68,13 @@ final class TakeEffectsPreview: @unchecked Sendable {
         return track
     }
 
-    private static func renderVocal(from source: URL, to destination: URL, settings: VocalSettings, wetReverbOnly: Bool) throws {
+    enum RenderMode { case tone, wetReverb }
+
+    static func renderVocal(from source: URL, to destination: URL, settings: VocalSettings, mode: RenderMode) throws {
         let input = try AVAudioFile(forReading: source, commonFormat: .pcmFormatFloat32, interleaved: false)
         let inputFormat = input.processingFormat
         let block: AVAudioFrameCount = 4096
-        let channels: AVAudioChannelCount = wetReverbOnly ? 2 : inputFormat.channelCount
+        let channels: AVAudioChannelCount = mode == .tone ? inputFormat.channelCount : 2
         guard let format = AVAudioFormat(standardFormatWithSampleRate: inputFormat.sampleRate, channels: channels),
               let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: block) else {
             throw AppFailure(message: "无法准备人声效果缓冲区。")
@@ -81,7 +83,7 @@ final class TakeEffectsPreview: @unchecked Sendable {
         let player = AVAudioPlayerNode()
         engine.attach(player)
         let wetReverb: AVAudioUnitReverb?
-        if wetReverbOnly {
+        if mode == .wetReverb {
             let reverb = AVAudioUnitReverb()
             engine.attach(reverb)
             engine.connect(player, to: reverb, format: inputFormat)

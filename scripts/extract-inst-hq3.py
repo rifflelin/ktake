@@ -5,6 +5,7 @@ from pathlib import Path
 
 from separation_model_files import cached_model_file
 from separation_progress import ExtractionProgress
+from separation_stems import write_stems
 
 
 MODEL_URL = (
@@ -20,10 +21,9 @@ def download_model(directory):
     cached_model_file(directory, "model.safetensors", MODEL_URL + "model.safetensors", WEIGHTS_SHA256)
 
 
-def extract(source, destination, model_dir, progress_path=None):
+def extract(source, destination, model_dir, progress_path=None, vocal_path=None):
     progress = ExtractionProgress(progress_path)
     progress.update("preparingModel")
-    import numpy as np
     import soundfile as sf
 
     audio, rate = sf.read(source, dtype="float32", always_2d=True)
@@ -49,12 +49,8 @@ def extract(source, destination, model_dir, progress_path=None):
     # This checkpoint predicts the instrumental stem directly.
     with progress.report_batches(mdx_separator, "tqdm"):
         accompaniment = separator.demix(audio.T).T
-    peak = float(np.max(np.abs(accompaniment)))
-    if accompaniment.shape != audio.shape or not np.isfinite(peak):
-        raise ValueError("Inst HQ 3 produced invalid audio")
-    if peak > 1:
-        accompaniment /= peak
-    sf.write(destination, accompaniment, rate, subtype="PCM_24")
+    progress.update("saving")
+    write_stems(audio, accompaniment, rate, destination, vocal_path)
 
 
 if __name__ == "__main__":
